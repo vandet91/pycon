@@ -103,12 +103,50 @@ async def upload_project(
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
             zf.extractall(project_dir)
     else:
-        # Single file upload
         dest = os.path.join(project_dir, file.filename)
         with open(dest, "wb") as f:
             f.write(content)
 
-    return {"success": True, "path": project_dir}
+    # Detect actual project root
+    actual_root = _find_project_root(project_dir)
+
+    # Check for requirements.txt
+    req_file = os.path.join(actual_root, "requirements.txt")
+    has_req = os.path.exists(req_file)
+
+    # Detect entry point candidates
+    py_files = [f for f in os.listdir(actual_root) if f.endswith(".py")]
+    entry_candidates = []
+    for preferred in ["main.py", "bot.py", "app.py", "run.py", "index.py"]:
+        if preferred in py_files:
+            entry_candidates.insert(0, preferred)
+    for f in py_files:
+        if f not in entry_candidates:
+            entry_candidates.append(f)
+
+    return {
+        "success": True,
+        "path": actual_root,
+        "has_requirements": has_req,
+        "entry_candidates": entry_candidates[:5],
+    }
+
+
+def _find_project_root(base: str) -> str:
+    entries = os.listdir(base)
+    has_py = any(f.endswith(".py") for f in entries)
+    has_req = "requirements.txt" in entries
+    if has_py or has_req:
+        return base
+    subdirs = [
+        os.path.join(base, e) for e in entries
+        if os.path.isdir(os.path.join(base, e)) and not e.startswith(".") and e != "venv"
+    ]
+    if len(subdirs) == 1:
+        sub_entries = os.listdir(subdirs[0])
+        if any(f.endswith(".py") for f in sub_entries) or "requirements.txt" in sub_entries:
+            return subdirs[0]
+    return base
 
 
 @router.post("/install-requirements")
@@ -244,6 +282,108 @@ WantedBy=multi-user.target
     log.append(f"[systemctl restart] rc={rc} {err or 'started'}")
 
     return {"success": rc == 0, "log": "\n".join(log)}
+
+
+@router.websocket("/ws/install")
+async def ws_install(
+    websocket: WebSocket,
+    token: str = Query(...),
+    name: str = Query(...),
+):
+    """Auto install requirements right after upload."""
+    try:
+        verify_token(token)
+    except Exception:
+        await websocket.close(code=4001)
+        return
+
+    await websocket.accept()
+
+    async def send(msg: str, kind: str = "log"):
+        await websocket.send_text(json.dumps({"type": kind, "msg": msg}))
+
+    async def stream_cmd(cmd: list[str], cwd: str = None):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+        )
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            await send(line.decode(errors="replace").rstrip())
+        await proc.wait()
+        return proc.returncode
+
+    try:
+        base = os.path.realpath(settings.SERVICES_BASE_DIR)
+        project_dir = os.path.join(base, name)
+        actual_root = _find_project_root(project_dir)
+
+        if actual_root != project_dir:
+            await send(f"📂 Project root detected: {actual_root}")
+
+        req_file = os.path.join(actual_root, "requirements.txt")
+        if not os.path.exists(req_file):
+            await send("⚠️  No requirements.txt found — skipping install", "warn")
+            await send("done", "done")
+            return
+
+        # Show requirements.txt content
+        with open(req_file) as f:
+            reqs = f.read().strip()
+        await send(f"📋 requirements.txt:\n{reqs}")
+
+        # Create venv
+        venv_dir = os.path.join(actual_root, "venv")
+        venv_pip = os.path.join(venv_dir, "bin", "pip")
+
+        if os.path.exists(venv_pip):
+            await send("✓ Venv already exists")
+        else:
+            await send("🔧 Creating virtual environment...", "step")
+            candidates = list(dict.fromkeys([sys.executable, VENV_PYTHON, "/usr/bin/python3", "python3"]))
+            created = False
+            for py in candidates:
+                await send(f"   Trying {py}...")
+                rc = await stream_cmd([py, "-m", "venv", venv_dir])
+                if rc == 0 and os.path.exists(venv_pip):
+                    await send(f"   ✓ Venv created", "success")
+                    created = True
+                    break
+                if os.path.exists(venv_dir):
+                    shutil.rmtree(venv_dir)
+                await send(f"   ✗ Failed (rc={rc})")
+
+            if not created:
+                await send("❌ Cannot create venv. Run on server:", "error")
+                await send("   sudo apt install python3-venv -y", "error")
+                await send("done", "done")
+                return
+
+        # Upgrade pip
+        await stream_cmd([venv_pip, "install", "--upgrade", "pip", "-q"])
+
+        # Install requirements
+        await send("📥 Installing requirements...", "step")
+        rc = await stream_cmd([venv_pip, "install", "-r", req_file])
+        if rc == 0:
+            await send("✅ All requirements installed!", "success")
+        else:
+            await send("❌ Some packages failed to install", "error")
+
+        await send("done", "done")
+
+    except Exception as e:
+        await send(f"❌ Error: {e}", "error")
+        await send("done", "done")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @router.websocket("/ws/deploy")
