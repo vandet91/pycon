@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, getToken } from "@/lib/api";
+import { api, getToken, wsUrl } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -19,6 +19,11 @@ interface DeployForm {
   env_vars: string;
 }
 
+interface LogLine {
+  type: string;
+  msg: string;
+}
+
 const defaultForm: DeployForm = {
   name: "",
   description: "",
@@ -26,17 +31,29 @@ const defaultForm: DeployForm = {
   env_vars: "",
 };
 
+function LogLine({ line }: { line: LogLine }) {
+  const color =
+    line.type === "error" ? "text-red-400" :
+    line.type === "success" ? "text-green-400" :
+    line.type === "step" ? "text-blue-400 font-semibold" :
+    line.type === "warn" ? "text-yellow-400" :
+    "text-gray-300";
+  return <div className={`leading-5 ${color}`}>{line.msg}</div>;
+}
+
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState<DeployForm>(defaultForm);
   const [file, setFile] = useState<File | null>(null);
-  const [step, setStep] = useState<"upload" | "deploy">("upload");
-  const [log, setLog] = useState("");
+  const [step, setStep] = useState<"upload" | "configure" | "deploying">("upload");
+  const [logs, setLogs] = useState<LogLine[]>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
 
   async function fetchProjects() {
     setLoading(true);
@@ -44,8 +61,7 @@ export default function ProjectsPage() {
       const res = await fetch(`${API_BASE}/api/projects/list`, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
-      const data = await res.json();
-      setProjects(data);
+      setProjects(await res.json());
     } finally {
       setLoading(false);
     }
@@ -53,13 +69,20 @@ export default function ProjectsPage() {
 
   useEffect(() => { fetchProjects(); }, []);
 
+  // Auto scroll logs
+  useEffect(() => {
+    logRef.current?.scrollTo(0, logRef.current.scrollHeight);
+  }, [logs]);
+
   function resetAdd() {
     setShowAdd(false);
     setForm(defaultForm);
     setFile(null);
     setStep("upload");
-    setLog("");
+    setLogs([]);
     setError("");
+    setDone(false);
+    setWorking(false);
   }
 
   async function handleUpload() {
@@ -73,8 +96,11 @@ export default function ProjectsPage() {
         `${API_BASE}/api/projects/upload?name=${encodeURIComponent(form.name)}`,
         { method: "POST", headers: { Authorization: `Bearer ${getToken()}` }, body }
       );
-      if (!res.ok) throw new Error((await res.json()).detail);
-      setStep("deploy");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Upload failed");
+      }
+      setStep("configure");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -83,28 +109,44 @@ export default function ProjectsPage() {
   }
 
   async function handleDeploy() {
+    setStep("deploying");
+    setLogs([]);
+    setDone(false);
     setWorking(true);
-    setError("");
-    setLog("");
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/deploy`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${getToken()}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(form),
-      });
-      const data = await res.json();
-      setLog(data.log || "");
-      if (!res.ok) throw new Error(data.detail || "Deploy failed");
-      await fetchProjects();
-      setTimeout(resetAdd, 3000);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
+
+    const params = new URLSearchParams({
+      name: form.name,
+      python_file: form.python_file,
+      description: form.description,
+      env_vars: form.env_vars,
+    });
+
+    const url = wsUrl(`/api/projects/ws/deploy`) + "&" + params.toString();
+    const ws = new WebSocket(url);
+
+    ws.onmessage = (e) => {
+      try {
+        const data: LogLine = JSON.parse(e.data);
+        if (data.type === "done") {
+          setDone(true);
+          setWorking(false);
+          fetchProjects();
+        } else {
+          setLogs((prev) => [...prev, data]);
+        }
+      } catch {
+        setLogs((prev) => [...prev, { type: "log", msg: e.data }]);
+      }
+    };
+
+    ws.onerror = () => {
+      setLogs((prev) => [...prev, { type: "error", msg: "WebSocket connection error" }]);
       setWorking(false);
-    }
+    };
+
+    ws.onclose = () => {
+      setWorking(false);
+    };
   }
 
   async function deleteProject(name: string, deleteFiles: boolean) {
@@ -170,7 +212,7 @@ export default function ProjectsPage() {
                     )}
                   </div>
                 </div>
-                <div className="flex gap-2 shrink-0">
+                <div className="flex flex-wrap gap-2 shrink-0">
                   {p.has_service && (
                     <>
                       <button
@@ -206,32 +248,41 @@ export default function ProjectsPage() {
         )}
       </div>
 
-      {/* Add project modal */}
+      {/* Modal */}
       {showAdd && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-panel border border-border rounded-2xl w-full max-w-lg">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-panel border border-border rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
               <h2 className="font-semibold text-white">Add Project</h2>
               <button onClick={resetAdd} className="text-muted hover:text-white text-xl leading-none">×</button>
             </div>
 
-            <div className="px-6 py-5 space-y-4">
-              {/* Step indicator */}
-              <div className="flex gap-2 text-xs mb-2">
-                <span className={`px-2 py-0.5 rounded-full ${step === "upload" ? "bg-blue-600 text-white" : "bg-border text-muted"}`}>
-                  1. Upload
-                </span>
-                <span className={`px-2 py-0.5 rounded-full ${step === "deploy" ? "bg-blue-600 text-white" : "bg-border text-muted"}`}>
-                  2. Configure & Deploy
-                </span>
-              </div>
+            {/* Steps */}
+            <div className="flex gap-2 px-6 pt-4 shrink-0">
+              {["upload", "configure", "deploying"].map((s, i) => (
+                <div key={s} className="flex items-center gap-1.5">
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${
+                    step === s ? "bg-blue-600 text-white" :
+                    ["upload", "configure", "deploying"].indexOf(step) > i ? "bg-green-800 text-green-300" :
+                    "bg-border text-muted"
+                  }`}>
+                    {i + 1}. {s.charAt(0).toUpperCase() + s.slice(1)}
+                  </span>
+                  {i < 2 && <span className="text-muted text-xs">→</span>}
+                </div>
+              ))}
+            </div>
 
+            {/* Body */}
+            <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1">
               {error && (
                 <div className="bg-red-900/30 border border-red-700 text-red-400 text-sm rounded-lg px-4 py-3">
                   {error}
                 </div>
               )}
 
+              {/* Step 1: Upload */}
               {step === "upload" && (
                 <>
                   <div>
@@ -243,7 +294,7 @@ export default function ProjectsPage() {
                       placeholder="mybot"
                       className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-muted focus:outline-none focus:border-blue-500"
                     />
-                    <p className="text-xs text-muted mt-1">Used as the folder name and service name</p>
+                    <p className="text-xs text-muted mt-1">Used as folder name and service name</p>
                   </div>
 
                   <div>
@@ -253,36 +304,31 @@ export default function ProjectsPage() {
                       className="border-2 border-dashed border-border rounded-lg p-6 text-center cursor-pointer hover:border-blue-500 transition-colors"
                     >
                       {file ? (
-                        <div className="text-sm text-white">{file.name}</div>
+                        <div>
+                          <div className="text-white text-sm font-medium">{file.name}</div>
+                          <div className="text-muted text-xs mt-1">{(file.size / 1024).toFixed(1)} KB</div>
+                        </div>
                       ) : (
                         <>
-                          <div className="text-2xl mb-2">📦</div>
-                          <div className="text-sm text-muted">Click to upload a <strong>.zip</strong> file or single <strong>.py</strong> file</div>
+                          <div className="text-3xl mb-2">📦</div>
+                          <div className="text-sm text-muted">
+                            Click to upload a <strong className="text-white">.zip</strong> or <strong className="text-white">.py</strong> file
+                          </div>
+                          <div className="text-xs text-muted mt-1">Zip your entire project folder including requirements.txt</div>
                         </>
                       )}
                     </div>
-                    <input
-                      ref={fileRef}
-                      type="file"
-                      accept=".zip,.py"
-                      className="hidden"
-                      onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                    />
+                    <input ref={fileRef} type="file" accept=".zip,.py" className="hidden"
+                      onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
                   </div>
                 </>
               )}
 
-              {step === "deploy" && (
+              {/* Step 2: Configure */}
+              {step === "configure" && (
                 <>
-                  <div>
-                    <label className="block text-xs text-muted mb-1.5">Description</label>
-                    <input
-                      type="text"
-                      value={form.description}
-                      onChange={(e) => setForm({ ...form, description: e.target.value })}
-                      placeholder="My Telegram bot"
-                      className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-muted focus:outline-none focus:border-blue-500"
-                    />
+                  <div className="bg-green-900/20 border border-green-800 rounded-lg px-4 py-3 text-sm text-green-400">
+                    ✓ Files uploaded to server
                   </div>
 
                   <div>
@@ -294,7 +340,18 @@ export default function ProjectsPage() {
                       placeholder="main.py"
                       className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-muted focus:outline-none focus:border-blue-500"
                     />
-                    <p className="text-xs text-muted mt-1">The Python file to run (e.g. bot.py, main.py)</p>
+                    <p className="text-xs text-muted mt-1">The Python file that starts your bot (e.g. bot.py, main.py)</p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-muted mb-1.5">Description</label>
+                    <input
+                      type="text"
+                      value={form.description}
+                      onChange={(e) => setForm({ ...form, description: e.target.value })}
+                      placeholder="My Telegram Bot"
+                      className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-muted focus:outline-none focus:border-blue-500"
+                    />
                   </div>
 
                   <div>
@@ -302,49 +359,76 @@ export default function ProjectsPage() {
                     <textarea
                       value={form.env_vars}
                       onChange={(e) => setForm({ ...form, env_vars: e.target.value })}
-                      placeholder={"BOT_TOKEN=123456:ABC\nAPI_KEY=mykey"}
+                      placeholder={"BOT_TOKEN=123456:ABC-xyz\nAPI_KEY=mykey\nDEBUG=false"}
                       rows={4}
                       className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-white placeholder-muted focus:outline-none focus:border-blue-500 font-mono resize-none"
                     />
-                    <p className="text-xs text-muted mt-1">One per line, KEY=VALUE format</p>
+                    <p className="text-xs text-muted mt-1">One per line — KEY=VALUE format</p>
                   </div>
-
-                  {log && (
-                    <pre className="bg-surface rounded-lg p-3 text-xs font-mono text-gray-300 overflow-auto max-h-48 whitespace-pre-wrap">
-                      {log}
-                    </pre>
-                  )}
                 </>
+              )}
+
+              {/* Step 3: Deploying - live log output */}
+              {step === "deploying" && (
+                <div
+                  ref={logRef}
+                  className="bg-surface rounded-xl p-4 font-mono text-xs h-72 overflow-y-auto space-y-0.5"
+                >
+                  {logs.length === 0 && (
+                    <div className="text-muted">Connecting…</div>
+                  )}
+                  {logs.map((line, i) => (
+                    <LogLine key={i} line={line} />
+                  ))}
+                  {working && (
+                    <div className="text-muted animate-pulse">▊</div>
+                  )}
+                  {done && (
+                    <div className="mt-3 text-green-400 font-bold">🎉 Deployment complete!</div>
+                  )}
+                </div>
               )}
             </div>
 
-            <div className="px-6 py-4 border-t border-border flex justify-end gap-3">
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-border flex justify-between items-center shrink-0">
               <button
                 onClick={resetAdd}
                 className="text-sm text-muted hover:text-white px-4 py-2 rounded-lg border border-border hover:border-gray-600 transition-colors"
               >
-                Cancel
+                {done ? "Close" : "Cancel"}
               </button>
 
-              {step === "upload" && (
-                <button
-                  onClick={handleUpload}
-                  disabled={working || !form.name || !file}
-                  className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white px-5 py-2 rounded-lg transition-colors"
-                >
-                  {working ? "Uploading…" : "Upload →"}
-                </button>
-              )}
+              <div className="flex gap-2">
+                {step === "upload" && (
+                  <button
+                    onClick={handleUpload}
+                    disabled={working || !form.name || !file}
+                    className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white px-5 py-2 rounded-lg transition-colors"
+                  >
+                    {working ? "Uploading…" : "Upload →"}
+                  </button>
+                )}
 
-              {step === "deploy" && (
-                <button
-                  onClick={handleDeploy}
-                  disabled={working || !form.python_file}
-                  className="text-sm bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white px-5 py-2 rounded-lg transition-colors"
-                >
-                  {working ? "Deploying…" : "🚀 Install & Start"}
-                </button>
-              )}
+                {step === "configure" && (
+                  <button
+                    onClick={handleDeploy}
+                    disabled={!form.python_file}
+                    className="text-sm bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white px-5 py-2 rounded-lg transition-colors"
+                  >
+                    🚀 Install & Deploy
+                  </button>
+                )}
+
+                {step === "deploying" && done && (
+                  <button
+                    onClick={resetAdd}
+                    className="text-sm bg-blue-600 hover:bg-blue-500 text-white px-5 py-2 rounded-lg transition-colors"
+                  >
+                    Done ✓
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

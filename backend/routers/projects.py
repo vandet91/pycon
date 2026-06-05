@@ -1,14 +1,15 @@
 import asyncio
+import json
 import os
 import shutil
 import zipfile
 import io
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 from typing import Optional
 
-from auth import get_current_user
+from auth import get_current_user, verify_token
 from config import settings
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -241,6 +242,161 @@ WantedBy=multi-user.target
     log.append(f"[systemctl restart] rc={rc} {err or 'started'}")
 
     return {"success": rc == 0, "log": "\n".join(log)}
+
+
+@router.websocket("/ws/deploy")
+async def ws_deploy(
+    websocket: WebSocket,
+    token: str = Query(...),
+    name: str = Query(...),
+    python_file: str = Query("main.py"),
+    description: str = Query(""),
+    env_vars: str = Query(""),
+):
+    try:
+        verify_token(token)
+    except Exception:
+        await websocket.close(code=4001)
+        return
+
+    await websocket.accept()
+
+    async def send(msg: str, kind: str = "log"):
+        await websocket.send_text(json.dumps({"type": kind, "msg": msg}))
+
+    async def stream_cmd(cmd: list[str], cwd: str = None):
+        """Run command and stream output line by line."""
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+        )
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            await send(line.decode(errors="replace").rstrip())
+        await proc.wait()
+        return proc.returncode
+
+    base = os.path.realpath(settings.SERVICES_BASE_DIR)
+    project_dir = os.path.join(base, name)
+
+    try:
+        # ── Step 1: Check project directory ──────────────────────
+        await send(f"📁 Project directory: {project_dir}", "step")
+        if not os.path.exists(project_dir):
+            await send(f"❌ Project directory not found", "error")
+            return
+
+        # List files found
+        files_found = os.listdir(project_dir)
+        await send(f"   Files found: {', '.join(files_found)}")
+
+        # ── Step 2: Check requirements.txt ───────────────────────
+        req_file = os.path.join(project_dir, "requirements.txt")
+        if os.path.exists(req_file):
+            await send("📦 Found requirements.txt", "step")
+
+            # Create venv
+            venv_dir = os.path.join(project_dir, "venv")
+            venv_pip = os.path.join(venv_dir, "bin", "pip")
+            venv_python = os.path.join(venv_dir, "bin", "python3")
+
+            if os.path.exists(venv_pip):
+                await send("   ✓ Venv already exists, skipping creation")
+            else:
+                await send("🔧 Creating virtual environment...", "step")
+                created = False
+                for py in [VENV_PYTHON, "python3", "python"]:
+                    await send(f"   Trying: {py} -m venv {venv_dir}")
+                    rc = await stream_cmd([py, "-m", "venv", venv_dir], cwd=project_dir)
+                    if rc == 0 and os.path.exists(venv_pip):
+                        await send("   ✓ Venv created successfully")
+                        created = True
+                        break
+                    else:
+                        await send(f"   ✗ Failed with {py}, trying next...")
+
+                if not created:
+                    await send("❌ Could not create venv. Run: sudo apt install python3-venv", "error")
+                    await send("   Falling back to system pip...")
+                    venv_pip = "pip3"
+                    venv_python = VENV_PYTHON
+
+            # Upgrade pip
+            await send("⬆️  Upgrading pip...", "step")
+            await stream_cmd([venv_pip, "install", "--upgrade", "pip"], cwd=project_dir)
+
+            # Install requirements
+            await send("📥 Installing requirements...", "step")
+            rc = await stream_cmd([venv_pip, "install", "-r", req_file], cwd=project_dir)
+            if rc == 0:
+                await send("✅ Requirements installed successfully", "success")
+            else:
+                await send(f"❌ pip install failed (rc={rc})", "error")
+                await send("   Check the output above for details")
+        else:
+            await send("⚠️  No requirements.txt found, skipping install", "warn")
+            venv_python = VENV_PYTHON
+
+        # ── Step 3: Create systemd service ───────────────────────
+        await send("⚙️  Creating systemd service...", "step")
+
+        venv_python_path = os.path.join(project_dir, "venv", "bin", "python3")
+        python_bin = venv_python_path if os.path.exists(venv_python_path) else VENV_PYTHON
+        await send(f"   Python: {python_bin}")
+        await send(f"   Entry: {python_file}")
+
+        env_lines = ""
+        if env_vars:
+            for line in env_vars.strip().splitlines():
+                line = line.strip()
+                if line and "=" in line and not line.startswith("#"):
+                    env_lines += f"Environment={line}\n"
+
+        service_content = f"""[Unit]
+Description={description or name}
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory={project_dir}
+ExecStart={python_bin} {python_file}
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+{env_lines}
+[Install]
+WantedBy=multi-user.target
+"""
+        service_path = f"{SYSTEMD_DIR}/{name}.service"
+        with open(service_path, "w") as f:
+            f.write(service_content)
+        await send(f"   ✓ Service file: {service_path}")
+
+        # ── Step 4: Enable and start ──────────────────────────────
+        await send("🚀 Starting service...", "step")
+        await stream_cmd(["systemctl", "daemon-reload"])
+        await stream_cmd(["systemctl", "enable", name])
+        rc = await stream_cmd(["systemctl", "restart", name])
+
+        if rc == 0:
+            await send(f"✅ Service '{name}' is running!", "success")
+        else:
+            await send(f"❌ Service failed to start. Check logs: journalctl -u {name} -n 50", "error")
+
+        await send("done", "done")
+
+    except Exception as e:
+        await send(f"❌ Unexpected error: {e}", "error")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @router.delete("/{name}")
