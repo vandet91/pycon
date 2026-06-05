@@ -12,12 +12,14 @@ function FileTree({
   selected,
   path,
   onNavigate,
+  onDelete,
 }: {
   nodes: FileNode[];
   onSelect: (node: FileNode) => void;
   selected: string;
   path: string;
   onNavigate: (path: string) => void;
+  onDelete: (node: FileNode) => void;
 }) {
   return (
     <div className="text-sm">
@@ -30,23 +32,34 @@ function FileTree({
         </button>
       )}
       {nodes.map((node) => (
-        <button
+        <div
           key={node.path}
-          onClick={() => (node.is_dir ? onNavigate(node.path) : onSelect(node))}
-          className={`flex items-center gap-2 px-3 py-1.5 w-full text-left rounded transition-colors ${
+          className={`group flex items-center gap-2 px-3 py-1.5 rounded transition-colors ${
             selected === node.path
               ? "bg-blue-600/20 text-blue-300"
               : "text-gray-300 hover:text-white hover:bg-white/5"
           }`}
         >
-          <span className="text-xs shrink-0">{node.is_dir ? "📁" : "📄"}</span>
-          <span className="truncate text-xs font-mono">{node.name}</span>
-          {!node.is_dir && node.size != null && (
-            <span className="ml-auto text-muted text-xs shrink-0">
-              {node.size < 1024 ? `${node.size}B` : `${(node.size / 1024).toFixed(1)}K`}
-            </span>
-          )}
-        </button>
+          <button
+            onClick={() => (node.is_dir ? onNavigate(node.path) : onSelect(node))}
+            className="flex items-center gap-2 flex-1 min-w-0 text-left"
+          >
+            <span className="text-xs shrink-0">{node.is_dir ? "📁" : "📄"}</span>
+            <span className="truncate text-xs font-mono">{node.name}</span>
+            {!node.is_dir && node.size != null && (
+              <span className="ml-auto text-muted text-xs shrink-0 pr-1">
+                {node.size < 1024 ? `${node.size}B` : `${(node.size / 1024).toFixed(1)}K`}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => onDelete(node)}
+            className="opacity-0 group-hover:opacity-100 text-muted hover:text-red-400 text-xs px-1 shrink-0 transition-opacity"
+            title={`Delete ${node.name}`}
+          >
+            ✕
+          </button>
+        </div>
       ))}
     </div>
   );
@@ -143,6 +156,21 @@ export default function FilesPage() {
     await loadDir(dirPath);
   }
 
+  async function deleteNode(node: FileNode) {
+    const label = node.is_dir ? `folder "${node.name}" and all its contents` : `"${node.name}"`;
+    if (!confirm(`Delete ${label}?`)) return;
+    try {
+      await api.files.delete(node.path);
+      if (selected?.path === node.path || selected?.path.startsWith(node.path + "/")) {
+        setSelected(null);
+        setContent("");
+      }
+      await loadDir(dirPath);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   const isDirty = content !== savedContent;
 
   return (
@@ -165,6 +193,7 @@ export default function FilesPage() {
               selected={selected?.path ?? ""}
               path={dirPath}
               onNavigate={loadDir}
+              onDelete={deleteNode}
             />
           )}
         </div>
