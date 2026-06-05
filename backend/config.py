@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD_HASH: str = ""
     SERVICES_BASE_DIR: str = "/home"
     ALLOWED_ORIGINS: str = "http://localhost:3000"
+    VENV_PYTHON: str = "/usr/bin/python3"
 
     @property
     def allowed_origins_list(self) -> list[str]:

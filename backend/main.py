@@ -9,7 +9,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from auth import create_access_token, verify_password
 from config import settings
-from routers import files, logs, services, terminal
+from routers import files, logs, projects, services, terminal
 
 app = FastAPI(title="PyServer Manager", version="1.0.0")
 
@@ -41,5 +41,6 @@ async def health():
 
 app.include_router(services.router, prefix="/api")
 app.include_router(files.router, prefix="/api")
+app.include_router(projects.router, prefix="/api")
 app.include_router(terminal.router, prefix="/api")
 app.include_router(logs.router, prefix="/api")

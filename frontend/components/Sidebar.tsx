@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: "▦" },
+  { href: "/projects", label: "Projects", icon: "🚀" },
   { href: "/services", label: "Services", icon: "⚙" },
   { href: "/files", label: "Files", icon: "📁" },
   { href: "/terminal", label: "Terminal", icon: ">" },
