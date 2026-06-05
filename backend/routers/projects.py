@@ -294,6 +294,30 @@ async def ws_deploy(
         files_found = os.listdir(project_dir)
         await send(f"   Files found: {', '.join(files_found)}")
 
+        # Auto-detect actual project root (handles zip with subfolder)
+        # If no requirements.txt or python files at top level, check one level down
+        def find_project_root(base: str) -> str:
+            # Check if requirements.txt or .py files exist at base
+            entries = os.listdir(base)
+            has_py = any(f.endswith(".py") for f in entries)
+            has_req = "requirements.txt" in entries
+            if has_py or has_req:
+                return base
+            # Check subdirectories
+            subdirs = [os.path.join(base, e) for e in entries if os.path.isdir(os.path.join(base, e)) and not e.startswith(".") and e != "venv"]
+            if len(subdirs) == 1:
+                subentries = os.listdir(subdirs[0])
+                has_py2 = any(f.endswith(".py") for f in subentries)
+                has_req2 = "requirements.txt" in subentries
+                if has_py2 or has_req2:
+                    return subdirs[0]
+            return base
+
+        actual_root = find_project_root(project_dir)
+        if actual_root != project_dir:
+            await send(f"   📂 Detected project root: {actual_root}")
+        project_dir = actual_root
+
         # ── Step 2: Check requirements.txt ───────────────────────
         req_file = os.path.join(project_dir, "requirements.txt")
         if os.path.exists(req_file):
@@ -346,8 +370,9 @@ async def ws_deploy(
 
         venv_python_path = os.path.join(project_dir, "venv", "bin", "python3")
         python_bin = venv_python_path if os.path.exists(venv_python_path) else VENV_PYTHON
+        entry_point = os.path.join(project_dir, python_file)
         await send(f"   Python: {python_bin}")
-        await send(f"   Entry: {python_file}")
+        await send(f"   Entry: {entry_point}")
 
         env_lines = ""
         if env_vars:
@@ -364,7 +389,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory={project_dir}
-ExecStart={python_bin} {python_file}
+ExecStart={python_bin} {entry_point}
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
