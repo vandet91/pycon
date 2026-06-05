@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  background-color: #0d1117;
+  color: #e6edf3;
+}
+
+/* xterm overrides */
+.xterm-viewport::-webkit-scrollbar { width: 6px; }
+.xterm-viewport::-webkit-scrollbar-track { background: #0d1117; }
+.xterm-viewport::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
