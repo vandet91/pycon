@@ -109,11 +109,20 @@ export default function ProjectsPage() {
 
   async function deleteProject(name: string, deleteFiles: boolean) {
     if (!confirm(`Remove service "${name}"${deleteFiles ? " and delete all files" : ""}?`)) return;
-    await fetch(
-      `${API_BASE}/api/projects/${name}?delete_files=${deleteFiles}`,
-      { method: "DELETE", headers: { Authorization: `Bearer ${getToken()}` } }
-    );
-    fetchProjects();
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/projects/${name}?delete_files=${deleteFiles}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${getToken()}` } }
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(`Failed: ${data.detail || res.statusText}`);
+        return;
+      }
+      fetchProjects();
+    } catch (e: unknown) {
+      alert(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   async function serviceAction(name: string, action: string) {
