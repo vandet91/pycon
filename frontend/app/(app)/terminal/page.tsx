@@ -20,7 +20,6 @@ export default function TerminalPage() {
       const { Terminal } = await import("xterm");
       const { FitAddon } = await import("xterm-addon-fit");
       const { WebLinksAddon } = await import("xterm-addon-web-links");
-      await import("xterm/css/xterm.css");
 
       term = new Terminal({
         theme: {
