@@ -86,8 +86,67 @@ function Input({ value, onChange, placeholder, type = "text" }: any) {
   );
 }
 
-function DataTable({ columns, rows, onDelete }: { columns: string[]; rows: any[][]; onDelete?: (row: any[]) => void }) {
-  if (!rows.length) return <div className="p-6 text-center text-muted text-sm">No rows</div>;
+// Column type options for table builder
+const SQLITE_TYPES = ["INTEGER", "TEXT", "REAL", "BLOB", "NUMERIC", "VARCHAR(255)", "BOOLEAN", "DATETIME"];
+const SERVER_TYPES = ["INT", "BIGINT", "VARCHAR(255)", "TEXT", "BOOLEAN", "FLOAT", "DOUBLE", "DECIMAL(10,2)", "DATETIME", "DATE", "TIMESTAMP", "JSON", "ENUM('a','b')"];
+
+interface ColumnDefUI { name: string; type: string; primary_key: boolean; not_null: boolean; default: string; autoincrement: boolean }
+
+function newCol(): ColumnDefUI { return { name: "", type: "VARCHAR(255)", primary_key: false, not_null: false, default: "", autoincrement: false }; }
+
+function TableBuilder({ types, value, onChange }: { types: string[]; value: ColumnDefUI[]; onChange: (v: ColumnDefUI[]) => void }) {
+  const set = (i: number, key: keyof ColumnDefUI, val: any) => {
+    const next = [...value];
+    (next[i] as any)[key] = val;
+    onChange(next);
+  };
+  return (
+    <div className="space-y-2">
+      {value.map((col, i) => (
+        <div key={i} className="bg-surface rounded-lg p-3 space-y-2">
+          <div className="flex gap-2">
+            <input value={col.name} onChange={(e) => set(i, "name", e.target.value)} placeholder="column_name"
+              className="flex-1 bg-panel border border-border rounded px-2 py-1.5 text-xs text-white font-mono placeholder-muted focus:outline-none focus:border-blue-500" />
+            <select value={col.type} onChange={(e) => set(i, "type", e.target.value)}
+              className="w-36 bg-panel border border-border rounded px-2 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500">
+              {types.map((t) => <option key={t}>{t}</option>)}
+            </select>
+            <button onClick={() => onChange(value.filter((_, j) => j !== i))} className="text-red-500 hover:text-red-400 text-xs px-1">✕</button>
+          </div>
+          <div className="flex gap-4 text-xs text-muted">
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" checked={col.primary_key} onChange={(e) => set(i, "primary_key", e.target.checked)} />
+              <span>Primary Key</span>
+            </label>
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" checked={col.autoincrement} onChange={(e) => set(i, "autoincrement", e.target.checked)} />
+              <span>Auto Increment</span>
+            </label>
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" checked={col.not_null} onChange={(e) => set(i, "not_null", e.target.checked)} />
+              <span>NOT NULL</span>
+            </label>
+            <input value={col.default} onChange={(e) => set(i, "default", e.target.value)} placeholder="Default value"
+              className="bg-panel border border-border rounded px-2 py-0.5 text-xs text-white placeholder-muted focus:outline-none w-28" />
+          </div>
+        </div>
+      ))}
+      <button onClick={() => onChange([...value, newCol()])}
+        className="w-full text-xs text-blue-400 hover:text-blue-300 border border-dashed border-border hover:border-blue-500 rounded-lg py-2 transition-colors">
+        + Add Column
+      </button>
+    </div>
+  );
+}
+
+function DataTable({
+  columns, rows, onDelete, onEdit
+}: {
+  columns: string[]; rows: any[][];
+  onDelete?: (row: any[]) => void;
+  onEdit?: (row: any[]) => void;
+}) {
+  if (!rows.length) return <div className="p-6 text-center text-muted text-sm">No rows found</div>;
   return (
     <table className="w-full text-xs border-collapse">
       <thead className="sticky top-0 bg-panel z-10">
@@ -95,7 +154,7 @@ function DataTable({ columns, rows, onDelete }: { columns: string[]; rows: any[]
           {columns.map((c) => (
             <th key={c} className="text-left px-3 py-2 border-b border-border text-muted font-medium whitespace-nowrap">{c}</th>
           ))}
-          {onDelete && <th className="px-3 py-2 border-b border-border w-8" />}
+          {(onEdit || onDelete) && <th className="px-3 py-2 border-b border-border w-16" />}
         </tr>
       </thead>
       <tbody>
@@ -106,9 +165,16 @@ function DataTable({ columns, rows, onDelete }: { columns: string[]; rows: any[]
                 {cell === null ? <span className="text-muted italic">NULL</span> : String(cell)}
               </td>
             ))}
-            {onDelete && (
-              <td className="px-2">
-                <button onClick={() => onDelete(row)} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-400 text-xs">✕</button>
+            {(onEdit || onDelete) && (
+              <td className="px-2 py-1.5">
+                <div className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity">
+                  {onEdit && (
+                    <button onClick={() => onEdit(row)} className="text-blue-400 hover:text-blue-300 text-xs px-1">✏</button>
+                  )}
+                  {onDelete && (
+                    <button onClick={() => onDelete(row)} className="text-red-500 hover:text-red-400 text-xs px-1">✕</button>
+                  )}
+                </div>
               </td>
             )}
           </tr>
@@ -155,6 +221,16 @@ export default function DatabasePage() {
   const [modal, setModal] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Table builder
+  const [newTableName, setNewTableName] = useState("");
+  const [newTableCols, setNewTableCols] = useState<ColumnDefUI[]>([
+    { name: "id", type: "INTEGER", primary_key: true, not_null: false, default: "", autoincrement: true },
+  ]);
+
+  // Row insert / edit
+  const [rowFormData, setRowFormData] = useState<Record<string, string>>({});
+  const [editingRow, setEditingRow] = useState<any[] | null>(null); // original row values
 
   // Forms
   const [serverForm, setServerForm] = useState({ name: "", type: "mysql", host: "", port: "", user: "", password: "", save_password: true });
@@ -212,6 +288,136 @@ export default function DatabasePage() {
     if (!selServer || !selDatabase || !selTable) return;
     const rows = await apiFetch(`/api/dbserver/servers/${selServer.id}/databases/${selDatabase}/tables/${selTable}/rows?limit=${PAGE_SIZE}&offset=${off}`);
     setTableRows(rows); setTableOffset(off);
+  }
+
+  // ── Row form helpers ──────────────────────────────────────
+
+  function openInsert(columns: string[]) {
+    const form: Record<string, string> = {};
+    columns.forEach((c) => (form[c] = ""));
+    setRowFormData(form);
+    setEditingRow(null);
+    setModal("row-form");
+  }
+
+  function openEdit(row: any[], columns: string[]) {
+    const form: Record<string, string> = {};
+    columns.forEach((c, i) => (form[c] = row[i] === null ? "" : String(row[i])));
+    setRowFormData(form);
+    setEditingRow(row);
+    setModal("row-form");
+  }
+
+  // SQLite create table
+  async function createSqliteTable() {
+    if (!selSqlite || !newTableName) return;
+    setLoading(true); setError("");
+    try {
+      await apiFetch("/api/database/sqlite/table/create", {
+        method: "POST",
+        body: JSON.stringify({ path: selSqlite.path, table: newTableName, columns: newTableCols }),
+      });
+      const tables = await apiFetch(`/api/database/sqlite/tables?path=${encodeURIComponent(selSqlite.path)}`);
+      setSqliteTables(tables);
+      setModal(""); setNewTableName(""); setNewTableCols([{ name: "id", type: "INTEGER", primary_key: true, not_null: false, default: "", autoincrement: true }]);
+    } catch (e: any) { setError(e.message); }
+    setLoading(false);
+  }
+
+  async function dropSqliteTable(table: string) {
+    if (!selSqlite || !confirm(`Drop table "${table}"? All data will be lost!`)) return;
+    await apiFetch(`/api/database/sqlite/table?path=${encodeURIComponent(selSqlite.path)}&table=${encodeURIComponent(table)}`, { method: "DELETE" });
+    setSqliteTables((t) => t.filter((x) => x.name !== table));
+    if (selSqliteTable === table) { setSelSqliteTable(""); setSqliteRows(null); }
+  }
+
+  // SQLite insert / update row
+  async function saveSqliteRow() {
+    if (!selSqlite || !selSqliteTable) return;
+    setLoading(true); setError("");
+    try {
+      const data: Record<string, any> = {};
+      Object.entries(rowFormData).forEach(([k, v]) => { data[k] = v === "" ? null : v; });
+
+      if (editingRow) {
+        // find pk column
+        const pkCol = sqliteRows?.columns[0] ?? "id";
+        const pkVal = editingRow[0];
+        await apiFetch("/api/database/sqlite/row/update", {
+          method: "PUT",
+          body: JSON.stringify({ path: selSqlite.path, table: selSqliteTable, pk_col: pkCol, pk_val: pkVal, data }),
+        });
+      } else {
+        await apiFetch("/api/database/sqlite/row/insert", {
+          method: "POST",
+          body: JSON.stringify({ path: selSqlite.path, table: selSqliteTable, data }),
+        });
+      }
+      await selectSqliteTable(selSqliteTable);
+      setModal("");
+    } catch (e: any) { setError(e.message); }
+    setLoading(false);
+  }
+
+  async function deleteSqliteRow(row: any[]) {
+    if (!selSqlite || !selSqliteTable) return;
+    const pkCol = sqliteRows?.columns[0] ?? "id";
+    const pkVal = row[0];
+    if (!confirm(`Delete row where ${pkCol} = ${pkVal}?`)) return;
+    await apiFetch(`/api/database/sqlite/row?path=${encodeURIComponent(selSqlite.path)}&table=${encodeURIComponent(selSqliteTable)}&pk_col=${encodeURIComponent(pkCol)}&pk_val=${encodeURIComponent(String(pkVal))}`, { method: "DELETE" });
+    await selectSqliteTable(selSqliteTable);
+  }
+
+  // Server create table
+  async function createServerTable() {
+    if (!selServer || !selDatabase || !newTableName) return;
+    setLoading(true); setError("");
+    try {
+      await apiFetch("/api/dbserver/tables/create", {
+        method: "POST",
+        body: JSON.stringify({ server_id: selServer.id, database: selDatabase, table: newTableName, columns: newTableCols }),
+      });
+      const tbls = await apiFetch(`/api/dbserver/servers/${selServer.id}/databases/${selDatabase}/tables`);
+      setTables(tbls); setModal(""); setNewTableName("");
+      setNewTableCols([{ name: "id", type: "INT", primary_key: true, not_null: false, default: "", autoincrement: true }]);
+    } catch (e: any) { setError(e.message); }
+    setLoading(false);
+  }
+
+  // Server insert / update row
+  async function saveServerRow() {
+    if (!selServer || !selDatabase || !selTable) return;
+    setLoading(true); setError("");
+    try {
+      const data: Record<string, any> = {};
+      Object.entries(rowFormData).forEach(([k, v]) => { data[k] = v === "" ? null : v; });
+
+      if (editingRow) {
+        const pkCol = tableRows?.columns[0] ?? "id";
+        const pkVal = editingRow[0];
+        await apiFetch("/api/dbserver/rows/update", {
+          method: "PUT",
+          body: JSON.stringify({ server_id: selServer.id, database: selDatabase, table: selTable, pk_col: pkCol, pk_val: pkVal, data }),
+        });
+      } else {
+        await apiFetch("/api/dbserver/rows/insert", {
+          method: "POST",
+          body: JSON.stringify({ server_id: selServer.id, database: selDatabase, table: selTable, data }),
+        });
+      }
+      await selectTable(selTable);
+      setModal("");
+    } catch (e: any) { setError(e.message); }
+    setLoading(false);
+  }
+
+  async function deleteServerRow(row: any[]) {
+    if (!selServer || !selDatabase || !selTable) return;
+    const pkCol = tableRows?.columns[0] ?? "id";
+    const pkVal = row[0];
+    if (!confirm(`Delete row where ${pkCol} = ${pkVal}?`)) return;
+    await apiFetch(`/api/dbserver/servers/${selServer.id}/databases/${selDatabase}/tables/${selTable}/rows?pk_col=${encodeURIComponent(pkCol)}&pk_val=${encodeURIComponent(String(pkVal))}`, { method: "DELETE" });
+    await selectTable(selTable);
   }
 
   // ── Actions ───────────────────────────────────────────────
@@ -443,6 +649,9 @@ export default function DatabasePage() {
                 <span className="text-xs font-mono text-white">{selSqlite.name}</span>
                 {selSqliteTable && <><span className="text-muted">→</span><span className="text-xs font-mono text-blue-400">{selSqliteTable}</span></>}
                 <div className="ml-auto flex gap-2">
+                  <Btn small color="gray" onClick={() => { setModal("create-table-sqlite"); }}>+ Table</Btn>
+                  {selSqliteTable && <Btn small color="green" onClick={() => openInsert(sqliteRows?.columns ?? [])}>+ Row</Btn>}
+                  {selSqliteTable && <Btn small color="red" onClick={() => dropSqliteTable(selSqliteTable)}>Drop Table</Btn>}
                   <Btn small color="gray" onClick={() => setSqliteTab("browse")}>Browse</Btn>
                   <Btn small color="gray" onClick={() => setSqliteTab("query")}>SQL</Btn>
                 </div>
@@ -451,7 +660,9 @@ export default function DatabasePage() {
               {sqliteTab === "browse" && (
                 <div className="flex-1 overflow-auto">
                   {sqliteRows
-                    ? <DataTable columns={sqliteRows.columns} rows={sqliteRows.rows} />
+                    ? <DataTable columns={sqliteRows.columns} rows={sqliteRows.rows}
+                        onEdit={(row) => openEdit(row, sqliteRows.columns)}
+                        onDelete={deleteSqliteRow} />
                     : <div className="flex-1 flex items-center justify-center text-muted text-sm p-10">Select a table</div>
                   }
                 </div>
@@ -503,12 +714,13 @@ export default function DatabasePage() {
               {serverTab === "databases" && (
                 <div className="flex-1 flex flex-col overflow-hidden">
                   <div className="px-5 py-3 border-b border-border flex items-center gap-3 shrink-0">
-                    <Btn small onClick={() => setModal("create-db")}>+ New Database</Btn>
-                    {selDatabase && (
-                      <>
-                        <span className="text-xs text-muted">Selected: <strong className="text-blue-400">{selDatabase}</strong></span>
-                        <Btn small color="red" onClick={() => dropDatabase(selDatabase)}>Drop DB</Btn>
-                      </>
+                    <Btn small onClick={() => setModal("create-db")}>+ New DB</Btn>
+                    {selDatabase && <Btn small color="green" onClick={() => { setModal("create-table-server"); }}>+ Table</Btn>}
+                    {selTable && <Btn small color="green" onClick={() => openInsert(tableRows?.columns ?? [])}>+ Row</Btn>}
+                    {selTable && <Btn small color="red" onClick={() => dropTable(selTable)}>Drop Table</Btn>}
+                    {selDatabase && !selTable && (
+                      <><span className="text-xs text-muted">DB: <strong className="text-blue-400">{selDatabase}</strong></span>
+                      <Btn small color="red" onClick={() => dropDatabase(selDatabase)}>Drop DB</Btn></>
                     )}
                   </div>
 
@@ -534,7 +746,9 @@ export default function DatabasePage() {
                       </div>
                       <div className="flex-1 overflow-auto">
                         {selTable && tableRows
-                          ? <DataTable columns={tableRows.columns} rows={tableRows.rows} />
+                          ? <DataTable columns={tableRows.columns} rows={tableRows.rows}
+                              onEdit={(row) => openEdit(row, tableRows.columns)}
+                              onDelete={deleteServerRow} />
                           : (
                             <div className="p-5 grid grid-cols-3 gap-2">
                               {tables.map((t) => (
@@ -725,6 +939,63 @@ export default function DatabasePage() {
             <Btn color="gray" onClick={() => setModal("")}>Cancel</Btn>
             <Btn color={modal === "grant" ? "green" : "red"} onClick={modal === "grant" ? grantPrivileges : revokePrivileges} disabled={loading}>
               {loading ? "…" : modal === "grant" ? "Grant" : "Revoke"}
+            </Btn>
+          </div>
+        </Modal>
+      )}
+
+      {/* Create Table — SQLite */}
+      {modal === "create-table-sqlite" && (
+        <Modal title="Create Table (SQLite)" onClose={() => { setModal(""); setError(""); }}>
+          {error && <div className="text-xs text-red-400 bg-red-900/20 border border-red-800 rounded px-3 py-2">{error}</div>}
+          <Field label="Table Name"><Input value={newTableName} onChange={(e: any) => setNewTableName(e.target.value)} placeholder="my_table" /></Field>
+          <Field label="Columns">
+            <TableBuilder types={SQLITE_TYPES} value={newTableCols} onChange={setNewTableCols} />
+          </Field>
+          <div className="flex justify-end gap-2 pt-2">
+            <Btn color="gray" onClick={() => setModal("")}>Cancel</Btn>
+            <Btn color="green" onClick={createSqliteTable} disabled={loading || !newTableName}>{loading ? "Creating…" : "Create Table"}</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {/* Create Table — Server */}
+      {modal === "create-table-server" && (
+        <Modal title={`Create Table in ${selDatabase}`} onClose={() => { setModal(""); setError(""); }}>
+          {error && <div className="text-xs text-red-400 bg-red-900/20 border border-red-800 rounded px-3 py-2">{error}</div>}
+          <Field label="Table Name"><Input value={newTableName} onChange={(e: any) => setNewTableName(e.target.value)} placeholder="my_table" /></Field>
+          <Field label="Columns">
+            <TableBuilder types={SERVER_TYPES} value={newTableCols} onChange={setNewTableCols} />
+          </Field>
+          <div className="flex justify-end gap-2 pt-2">
+            <Btn color="gray" onClick={() => setModal("")}>Cancel</Btn>
+            <Btn color="green" onClick={createServerTable} disabled={loading || !newTableName}>{loading ? "Creating…" : "Create Table"}</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {/* Insert / Edit Row */}
+      {modal === "row-form" && (
+        <Modal title={editingRow ? "Edit Row" : "Insert Row"} onClose={() => { setModal(""); setError(""); }}>
+          {error && <div className="text-xs text-red-400 bg-red-900/20 border border-red-800 rounded px-3 py-2">{error}</div>}
+          <div className="space-y-3 max-h-80 overflow-y-auto">
+            {Object.keys(rowFormData).map((col) => (
+              <Field key={col} label={col}>
+                <input
+                  value={rowFormData[col]}
+                  onChange={(e) => setRowFormData({ ...rowFormData, [col]: e.target.value })}
+                  placeholder={`NULL`}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-white font-mono placeholder-muted focus:outline-none focus:border-blue-500"
+                />
+              </Field>
+            ))}
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Btn color="gray" onClick={() => setModal("")}>Cancel</Btn>
+            <Btn color="green"
+              onClick={mode === "sqlite" ? saveSqliteRow : saveServerRow}
+              disabled={loading}>
+              {loading ? "Saving…" : editingRow ? "Save Changes" : "Insert Row"}
             </Btn>
           </div>
         </Modal>

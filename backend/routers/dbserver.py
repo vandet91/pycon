@@ -5,7 +5,7 @@ Handles: connections, databases, users, permissions, tables, queries
 import json
 import os
 import uuid
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -80,6 +80,38 @@ class RevokeRequest(BaseModel):
     database: str
     privileges: str = "ALL PRIVILEGES"
     host: Optional[str] = "%"
+
+
+class ColumnDef(BaseModel):
+    name: str
+    type: str
+    primary_key: bool = False
+    not_null: bool = False
+    default: Optional[str] = None
+    autoincrement: bool = False
+
+
+class CreateTableRequest(BaseModel):
+    server_id: str
+    database: str
+    table: str
+    columns: List[ColumnDef]
+
+
+class InsertRowRequest(BaseModel):
+    server_id: str
+    database: str
+    table: str
+    data: Dict[str, Any]
+
+
+class UpdateRowRequest(BaseModel):
+    server_id: str
+    database: str
+    table: str
+    pk_col: str
+    pk_val: Any
+    data: Dict[str, Any]
 
 
 # ── Connection helpers ────────────────────────────────────────
@@ -367,6 +399,81 @@ async def show_grants(server_id: str, username: str, host: str = "%", _user=Depe
     else:
         result = execute_query(cfg, f"SELECT * FROM information_schema.role_table_grants WHERE grantee = '{username}'")
         return {"grants": result["rows"], "columns": result["columns"]}
+
+
+# ── Table create / drop ───────────────────────────────────────
+
+@router.post("/tables/create")
+async def create_table(req: CreateTableRequest, _user=Depends(get_current_user)):
+    cfg = get_server(req.server_id)
+    col_defs = []
+    for c in req.columns:
+        if cfg["type"] == "mysql":
+            definition = f"`{c.name}` {c.type}"
+            if c.primary_key:
+                definition += " PRIMARY KEY"
+                if c.autoincrement:
+                    definition += " AUTO_INCREMENT"
+            if c.not_null and not c.primary_key:
+                definition += " NOT NULL"
+            if c.default is not None:
+                definition += f" DEFAULT {c.default}"
+        else:  # postgres
+            ptype = c.type
+            if c.autoincrement and "INT" in c.type.upper():
+                ptype = "SERIAL"
+            definition = f'"{c.name}" {ptype}'
+            if c.primary_key:
+                definition += " PRIMARY KEY"
+            if c.not_null and not c.primary_key:
+                definition += " NOT NULL"
+            if c.default is not None:
+                definition += f" DEFAULT {c.default}"
+        col_defs.append(definition)
+
+    if cfg["type"] == "mysql":
+        sql = f"CREATE TABLE IF NOT EXISTS `{req.table}` ({', '.join(col_defs)})"
+    else:
+        sql = f'CREATE TABLE IF NOT EXISTS "{req.table}" ({", ".join(col_defs)})'
+
+    execute_query(cfg, sql, database=req.database)
+    return {"success": True, "sql": sql}
+
+
+# ── Row insert / update ───────────────────────────────────────
+
+@router.post("/rows/insert")
+async def insert_row(req: InsertRowRequest, _user=Depends(get_current_user)):
+    cfg = get_server(req.server_id)
+    cols = list(req.data.keys())
+    vals = list(req.data.values())
+    if cfg["type"] == "mysql":
+        col_names = ", ".join([f"`{c}`" for c in cols])
+        placeholders = ", ".join(["%s"] * len(cols))
+        sql = f"INSERT INTO `{req.table}` ({col_names}) VALUES ({placeholders})"
+    else:
+        col_names = ", ".join([f'"{c}"' for c in cols])
+        placeholders = ", ".join(["%s"] * len(cols))
+        sql = f'INSERT INTO "{req.table}" ({col_names}) VALUES ({placeholders})'
+    result = execute_query(cfg, sql, database=req.database, params=vals)
+    return {"success": True, **result}
+
+
+@router.put("/rows/update")
+async def update_row(req: UpdateRowRequest, _user=Depends(get_current_user)):
+    cfg = get_server(req.server_id)
+    data = {k: v for k, v in req.data.items() if k != req.pk_col}
+    if not data:
+        raise HTTPException(status_code=400, detail="No columns to update")
+    if cfg["type"] == "mysql":
+        sets = ", ".join([f"`{k}` = %s" for k in data.keys()])
+        sql = f"UPDATE `{req.table}` SET {sets} WHERE `{req.pk_col}` = %s"
+    else:
+        sets = ", ".join([f'"{k}" = %s' for k in data.keys()])
+        sql = f'UPDATE "{req.table}" SET {sets} WHERE "{req.pk_col}" = %s'
+    vals = list(data.values()) + [req.pk_val]
+    result = execute_query(cfg, sql, database=req.database, params=vals)
+    return {"success": True, **result}
 
 
 # ── Query ─────────────────────────────────────────────────────

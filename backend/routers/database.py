@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import json
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -58,6 +58,35 @@ class ExternalDBRequest(BaseModel):
     user: str
     password: str
     database: str
+
+
+class ColumnDef(BaseModel):
+    name: str
+    type: str           # TEXT, INTEGER, REAL, BLOB, VARCHAR(255), etc.
+    primary_key: bool = False
+    not_null: bool = False
+    default: Optional[str] = None
+    autoincrement: bool = False
+
+
+class CreateTableRequest(BaseModel):
+    path: str
+    table: str
+    columns: List[ColumnDef]
+
+
+class InsertRowRequest(BaseModel):
+    path: str
+    table: str
+    data: Dict[str, Any]
+
+
+class UpdateRowRequest(BaseModel):
+    path: str
+    table: str
+    pk_col: str
+    pk_val: Any
+    data: Dict[str, Any]
 
 
 # ── SQLite endpoints ──────────────────────────────────────────
@@ -175,7 +204,6 @@ async def delete_row(
 
 @router.get("/sqlite/export")
 async def export_table(path: str, table: str, _user=Depends(get_current_user)):
-    """Export table as JSON."""
     conn = get_sqlite_conn(path)
     try:
         cur = conn.execute(f"SELECT * FROM `{table}`")
@@ -183,5 +211,83 @@ async def export_table(path: str, table: str, _user=Depends(get_current_user)):
         rows = cur.fetchall()
         data = [dict(zip(cols, row)) for row in rows]
         return {"table": table, "columns": cols, "data": data, "count": len(data)}
+    finally:
+        conn.close()
+
+
+@router.post("/sqlite/table/create")
+async def create_table(req: CreateTableRequest, _user=Depends(get_current_user)):
+    conn = get_sqlite_conn(req.path)
+    try:
+        col_defs = []
+        for c in req.columns:
+            definition = f"`{c.name}` {c.type}"
+            if c.primary_key:
+                definition += " PRIMARY KEY"
+                if c.autoincrement and "INT" in c.type.upper():
+                    definition += " AUTOINCREMENT"
+            if c.not_null and not c.primary_key:
+                definition += " NOT NULL"
+            if c.default is not None:
+                definition += f" DEFAULT {c.default}"
+            col_defs.append(definition)
+
+        sql = f"CREATE TABLE IF NOT EXISTS `{req.table}` ({', '.join(col_defs)})"
+        conn.execute(sql)
+        conn.commit()
+        return {"success": True, "sql": sql}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+@router.delete("/sqlite/table")
+async def drop_table(path: str, table: str, _user=Depends(get_current_user)):
+    conn = get_sqlite_conn(path)
+    try:
+        conn.execute(f"DROP TABLE IF EXISTS `{table}`")
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/sqlite/row/insert")
+async def insert_row(req: InsertRowRequest, _user=Depends(get_current_user)):
+    conn = get_sqlite_conn(req.path)
+    try:
+        cols = list(req.data.keys())
+        vals = list(req.data.values())
+        placeholders = ", ".join(["?"] * len(cols))
+        col_names = ", ".join([f"`{c}`" for c in cols])
+        sql = f"INSERT INTO `{req.table}` ({col_names}) VALUES ({placeholders})"
+        cur = conn.execute(sql, vals)
+        conn.commit()
+        return {"success": True, "last_id": cur.lastrowid}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+@router.put("/sqlite/row/update")
+async def update_row(req: UpdateRowRequest, _user=Depends(get_current_user)):
+    conn = get_sqlite_conn(req.path)
+    try:
+        # Exclude pk from update data
+        data = {k: v for k, v in req.data.items() if k != req.pk_col}
+        if not data:
+            raise HTTPException(status_code=400, detail="No columns to update")
+        sets = ", ".join([f"`{k}` = ?" for k in data.keys()])
+        vals = list(data.values()) + [req.pk_val]
+        sql = f"UPDATE `{req.table}` SET {sets} WHERE `{req.pk_col}` = ?"
+        cur = conn.execute(sql, vals)
+        conn.commit()
+        return {"success": True, "rowcount": cur.rowcount}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
     finally:
         conn.close()
