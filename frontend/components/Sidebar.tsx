@@ -10,6 +10,7 @@ const NAV = [
   { href: "/services", label: "Services", icon: "⚙" },
   { href: "/files", label: "Files", icon: "📁" },
   { href: "/terminal", label: "Terminal", icon: ">" },
+  { href: "/database", label: "Database", icon: "🗄" },
   { href: "/logs", label: "Logs", icon: "≡" },
 ];
 
