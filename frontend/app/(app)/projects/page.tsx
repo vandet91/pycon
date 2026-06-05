@@ -191,7 +191,13 @@ export default function ProjectsPage() {
                     onClick={() => deleteProject(p.name, false)}
                     className="text-xs px-2.5 py-1 rounded border border-border text-muted hover:text-red-400 hover:border-red-800 transition-colors"
                   >
-                    Remove
+                    Remove Service
+                  </button>
+                  <button
+                    onClick={() => deleteProject(p.name, true)}
+                    className="text-xs px-2.5 py-1 rounded border border-red-900 text-red-500 hover:bg-red-900/30 transition-colors"
+                  >
+                    Delete All
                   </button>
                 </div>
               </div>
