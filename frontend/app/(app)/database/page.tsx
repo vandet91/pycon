@@ -456,6 +456,13 @@ export default function DatabasePage() {
     setLoading(false);
   }
 
+  async function dropTable(table: string) {
+    if (!selServer || !selDatabase || !confirm(`Drop table "${table}"? All data will be lost!`)) return;
+    await apiFetch(`/api/dbserver/servers/${selServer.id}/databases/${selDatabase}/tables/${table}`, { method: "DELETE" });
+    setTables((t) => t.filter((x) => x.name !== table));
+    if (selTable === table) { setSelTable(""); setTableRows(null); }
+  }
+
   async function dropDatabase(db: string) {
     if (!selServer || !confirm(`Drop database "${db}"? This cannot be undone!`)) return;
     await apiFetch(`/api/dbserver/databases/${selServer.id}/${db}`, { method: "DELETE" });
