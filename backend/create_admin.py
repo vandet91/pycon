@@ -2,9 +2,7 @@
 """Generate a bcrypt password hash to put in your .env file."""
 import getpass
 import sys
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+import bcrypt
 
 
 def main():
@@ -13,7 +11,7 @@ def main():
     if password != confirm:
         print("Passwords don't match.", file=sys.stderr)
         sys.exit(1)
-    hashed = pwd_context.hash(password)
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     print("\nAdd this line to your .env file:")
     print(f"ADMIN_PASSWORD_HASH={hashed}")
 
