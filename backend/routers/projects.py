@@ -28,6 +28,30 @@ async def run(cmd: list[str], cwd: str = None) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
+async def ensure_venv(project_dir: str) -> tuple[bool, str, str]:
+    """Create venv if it doesn't exist. Returns (success, pip_path, log)."""
+    venv_dir = os.path.join(project_dir, "venv")
+    venv_pip = os.path.join(venv_dir, "bin", "pip")
+    venv_python = os.path.join(venv_dir, "bin", "python3")
+
+    if os.path.exists(venv_pip):
+        return True, venv_pip, "[venv] Already exists\n"
+
+    log = ""
+    # Try creating with the configured python
+    for python_bin in [VENV_PYTHON, "python3", "python"]:
+        rc, out, err = await run([python_bin, "-m", "venv", venv_dir], cwd=project_dir)
+        log += f"[venv] {python_bin} -m venv → rc={rc}\n"
+        if rc == 0 and os.path.exists(venv_pip):
+            log += "[venv] Created successfully\n"
+            # Upgrade pip inside venv
+            await run([venv_pip, "install", "--upgrade", "pip"], cwd=project_dir)
+            return True, venv_pip, log
+        log += f"  stderr: {err.strip()}\n"
+
+    return False, "", log + "[venv] Failed to create venv. Try: sudo apt install python3-venv\n"
+
+
 class ProjectCreate(BaseModel):
     name: str                        # service name e.g. "mybot"
     description: Optional[str] = ""
@@ -93,16 +117,12 @@ async def install_requirements(name: str, _user=Depends(get_current_user)):
     if not os.path.exists(req_file):
         raise HTTPException(status_code=404, detail="requirements.txt not found")
 
-    # Use venv python if exists, else system python
-    venv_pip = os.path.join(project_dir, "venv", "bin", "pip")
-    if not os.path.exists(venv_pip):
-        # Create venv
-        rc, out, err = await run([VENV_PYTHON, "-m", "venv", "venv"], cwd=project_dir)
-        if rc != 0:
-            raise HTTPException(status_code=500, detail=f"Failed to create venv: {err}")
+    ok, venv_pip, venv_log = await ensure_venv(project_dir)
+    if not ok:
+        raise HTTPException(status_code=500, detail=venv_log)
 
     rc, out, err = await run([venv_pip, "install", "-r", req_file], cwd=project_dir)
-    return {"returncode": rc, "output": out, "error": err}
+    return {"returncode": rc, "output": venv_log + out, "error": err}
 
 
 @router.post("/create-service")
@@ -171,19 +191,19 @@ async def deploy_project(req: ProjectCreate, _user=Depends(get_current_user)):
 
     # Install requirements if exists
     req_file = os.path.join(project_dir, "requirements.txt")
-    if os.path.exists(req_file):
-        venv_pip = os.path.join(project_dir, "venv", "bin", "pip")
-        if not os.path.exists(venv_pip):
-            rc, out, err = await run([VENV_PYTHON, "-m", "venv", "venv"], cwd=project_dir)
-            log.append(f"[venv] rc={rc} {err or 'created'}")
+    venv_python = os.path.join(project_dir, "venv", "bin", "python3")
 
+    if os.path.exists(req_file):
+        ok, venv_pip, venv_log = await ensure_venv(project_dir)
+        log.append(venv_log)
+        if not ok:
+            return {"success": False, "log": "\n".join(log)}
         rc, out, err = await run([venv_pip, "install", "-r", req_file], cwd=project_dir)
         log.append(f"[pip install] rc={rc}\n{out or err}")
     else:
         log.append("[pip] No requirements.txt found, skipping")
 
     # Create service
-    venv_python = os.path.join(project_dir, "venv", "bin", "python3")
     python_bin = req.python_bin or (venv_python if os.path.exists(venv_python) else VENV_PYTHON)
 
     env_lines = ""
