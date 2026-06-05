@@ -10,6 +10,8 @@ interface Project {
   path: string;
   has_service: boolean;
   has_requirements: boolean;
+  active: string;
+  enabled: string;
 }
 
 interface DeployForm {
@@ -30,6 +32,23 @@ const defaultForm: DeployForm = {
   python_file: "main.py",
   env_vars: "",
 };
+
+function StatusBadge({ active }: { active: string }) {
+  const map: Record<string, { color: string; dot: string; label: string; pulse: boolean }> = {
+    active:     { color: "bg-green-900/40 text-green-400 border-green-800",  dot: "bg-green-400",  label: "Running",  pulse: true  },
+    inactive:   { color: "bg-gray-800 text-gray-400 border-gray-700",        dot: "bg-gray-500",   label: "Stopped",  pulse: false },
+    failed:     { color: "bg-red-900/40 text-red-400 border-red-800",        dot: "bg-red-400",    label: "Failed",   pulse: false },
+    activating: { color: "bg-yellow-900/40 text-yellow-400 border-yellow-800", dot: "bg-yellow-400", label: "Starting", pulse: true  },
+    none:       { color: "bg-gray-800 text-gray-500 border-gray-700",        dot: "bg-gray-600",   label: "No Service", pulse: false },
+  };
+  const s = map[active] ?? map["none"];
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full border ${s.color}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${s.dot} ${s.pulse ? "animate-pulse" : ""}`} />
+      {s.label}
+    </span>
+  );
+}
 
 function LogOutput({ lines, working, done }: { lines: LogLine[]; working: boolean; done: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -244,18 +263,21 @@ export default function ProjectsPage() {
           projects.map((p) => (
             <div key={p.name} className="bg-panel border border-border rounded-xl p-5">
               <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="font-mono text-white font-medium">{p.name}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <div className="font-mono text-white font-medium">{p.name}</div>
+                    <StatusBadge active={p.active} />
+                  </div>
                   <div className="text-muted text-xs mt-0.5">{p.path}</div>
-                  <div className="flex gap-2 mt-2">
+                  <div className="flex gap-2 mt-2 flex-wrap">
                     {p.has_requirements && (
                       <span className="text-xs bg-blue-900/40 text-blue-400 border border-blue-800 px-2 py-0.5 rounded-full">
                         requirements.txt
                       </span>
                     )}
                     {p.has_service && (
-                      <span className="text-xs bg-green-900/40 text-green-400 border border-green-800 px-2 py-0.5 rounded-full">
-                        systemd service
+                      <span className="text-xs bg-gray-800 text-gray-400 border border-gray-700 px-2 py-0.5 rounded-full">
+                        {p.enabled === "enabled" ? "⚡ auto-start" : "manual"}
                       </span>
                     )}
                   </div>
@@ -263,19 +285,30 @@ export default function ProjectsPage() {
                 <div className="flex flex-wrap gap-2 shrink-0">
                   {p.has_service && (
                     <>
-                      <button onClick={() => serviceAction(p.name, "restart")}
-                        className="text-xs px-2.5 py-1 rounded border border-yellow-800 text-yellow-400 hover:bg-yellow-900/30 transition-colors">
-                        Restart
-                      </button>
-                      <button onClick={() => serviceAction(p.name, "stop")}
-                        className="text-xs px-2.5 py-1 rounded border border-red-800 text-red-400 hover:bg-red-900/30 transition-colors">
-                        Stop
-                      </button>
+                      {/* Show Start only when stopped or failed */}
+                      {(p.active === "inactive" || p.active === "failed") && (
+                        <button onClick={() => serviceAction(p.name, "start")}
+                          className="text-xs px-2.5 py-1 rounded border border-green-800 text-green-400 hover:bg-green-900/30 transition-colors">
+                          ▶ Start
+                        </button>
+                      )}
+                      {p.active === "active" && (
+                        <button onClick={() => serviceAction(p.name, "restart")}
+                          className="text-xs px-2.5 py-1 rounded border border-yellow-800 text-yellow-400 hover:bg-yellow-900/30 transition-colors">
+                          ↺ Restart
+                        </button>
+                      )}
+                      {p.active === "active" && (
+                        <button onClick={() => serviceAction(p.name, "stop")}
+                          className="text-xs px-2.5 py-1 rounded border border-red-800 text-red-400 hover:bg-red-900/30 transition-colors">
+                          ■ Stop
+                        </button>
+                      )}
                     </>
                   )}
                   <button onClick={() => deleteProject(p.name, false)}
                     className="text-xs px-2.5 py-1 rounded border border-border text-muted hover:text-red-400 hover:border-red-800 transition-colors">
-                    Remove Service
+                    Remove
                   </button>
                   <button onClick={() => deleteProject(p.name, true)}
                     className="text-xs px-2.5 py-1 rounded border border-red-900 text-red-500 hover:bg-red-900/30 transition-colors">

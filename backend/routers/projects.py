@@ -63,6 +63,26 @@ class ProjectCreate(BaseModel):
     env_vars: Optional[str] = ""    # extra env lines e.g. BOT_TOKEN=xxx
 
 
+async def get_service_status(name: str) -> dict:
+    proc = await asyncio.create_subprocess_exec(
+        "systemctl", "is-active", f"{name}.service",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    active = stdout.decode().strip()  # active, inactive, failed, activating
+
+    proc2 = await asyncio.create_subprocess_exec(
+        "systemctl", "is-enabled", f"{name}.service",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout2, _ = await proc2.communicate()
+    enabled = stdout2.decode().strip()  # enabled, disabled, not-found
+
+    return {"active": active, "enabled": enabled}
+
+
 @router.get("/list")
 async def list_projects(_user=Depends(get_current_user)):
     base = os.path.realpath(settings.SERVICES_BASE_DIR)
@@ -73,12 +93,20 @@ async def list_projects(_user=Depends(get_current_user)):
             continue
         service_file = f"/etc/systemd/system/{name}.service"
         has_service = os.path.exists(service_file)
-        has_req = os.path.exists(os.path.join(path, "requirements.txt"))
+
+        # Check inside subdirectories too for requirements.txt
+        actual_root = _find_project_root(path)
+        has_req = os.path.exists(os.path.join(actual_root, "requirements.txt"))
+
+        status = await get_service_status(name) if has_service else {"active": "none", "enabled": "none"}
+
         projects.append({
             "name": name,
-            "path": path,
+            "path": actual_root,
             "has_service": has_service,
             "has_requirements": has_req,
+            "active": status["active"],
+            "enabled": status["enabled"],
         })
     return projects
 
