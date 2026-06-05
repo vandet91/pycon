@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import zipfile
 import io
 
@@ -39,18 +40,19 @@ async def ensure_venv(project_dir: str) -> tuple[bool, str, str]:
         return True, venv_pip, "[venv] Already exists\n"
 
     log = ""
-    # Try creating with the configured python
-    for python_bin in [VENV_PYTHON, "python3", "python"]:
+    candidates = list(dict.fromkeys([sys.executable, VENV_PYTHON, "/usr/bin/python3", "python3"]))
+    for python_bin in candidates:
         rc, out, err = await run([python_bin, "-m", "venv", venv_dir], cwd=project_dir)
         log += f"[venv] {python_bin} -m venv → rc={rc}\n"
         if rc == 0 and os.path.exists(venv_pip):
             log += "[venv] Created successfully\n"
-            # Upgrade pip inside venv
-            await run([venv_pip, "install", "--upgrade", "pip"], cwd=project_dir)
+            await run([venv_pip, "install", "--upgrade", "pip", "-q"], cwd=project_dir)
             return True, venv_pip, log
         log += f"  stderr: {err.strip()}\n"
+        if os.path.exists(venv_dir):
+            shutil.rmtree(venv_dir)
 
-    return False, "", log + "[venv] Failed to create venv. Try: sudo apt install python3-venv\n"
+    return False, "", log + "[venv] Failed. Fix: sudo apt install python3-venv -y\n"
 
 
 class ProjectCreate(BaseModel):
@@ -329,38 +331,52 @@ async def ws_deploy(
             venv_python = os.path.join(venv_dir, "bin", "python3")
 
             if os.path.exists(venv_pip):
-                await send("   ✓ Venv already exists, skipping creation")
+                await send("   ✓ Venv already exists")
             else:
                 await send("🔧 Creating virtual environment...", "step")
+
+                # Try python candidates — sys.executable first (guaranteed to exist)
+                candidates = list(dict.fromkeys([
+                    sys.executable,
+                    VENV_PYTHON,
+                    "/usr/bin/python3",
+                    "python3",
+                ]))
+
                 created = False
-                for py in [VENV_PYTHON, "python3", "python"]:
+                for py in candidates:
                     await send(f"   Trying: {py} -m venv {venv_dir}")
-                    rc = await stream_cmd([py, "-m", "venv", venv_dir], cwd=project_dir)
+                    rc = await stream_cmd([py, "-m", "venv", venv_dir])
                     if rc == 0 and os.path.exists(venv_pip):
-                        await send("   ✓ Venv created successfully")
+                        await send(f"   ✓ Venv created with {py}")
                         created = True
                         break
                     else:
-                        await send(f"   ✗ Failed with {py}, trying next...")
+                        # Clean up failed venv dir before retrying
+                        if os.path.exists(venv_dir):
+                            shutil.rmtree(venv_dir)
+                        await send(f"   ✗ Failed (rc={rc}), trying next...")
 
                 if not created:
-                    await send("❌ Could not create venv. Run: sudo apt install python3-venv", "error")
-                    await send("   Falling back to system pip...")
-                    venv_pip = "pip3"
-                    venv_python = VENV_PYTHON
+                    await send("❌ Could not create venv!", "error")
+                    await send("   Fix: sudo apt install python3-venv -y", "error")
+                    await send("   Then re-deploy the project.", "error")
+                    await send("done", "done")
+                    return
 
-            # Upgrade pip
-            await send("⬆️  Upgrading pip...", "step")
-            await stream_cmd([venv_pip, "install", "--upgrade", "pip"], cwd=project_dir)
+            # Upgrade pip silently
+            await stream_cmd([venv_pip, "install", "--upgrade", "pip", "-q"])
 
-            # Install requirements
+            # Install requirements with full output
             await send("📥 Installing requirements...", "step")
-            rc = await stream_cmd([venv_pip, "install", "-r", req_file], cwd=project_dir)
+            rc = await stream_cmd([venv_pip, "install", "-r", req_file])
             if rc == 0:
                 await send("✅ Requirements installed successfully", "success")
             else:
                 await send(f"❌ pip install failed (rc={rc})", "error")
-                await send("   Check the output above for details")
+                await send("   Fix the errors above then re-deploy.", "error")
+                await send("done", "done")
+                return
         else:
             await send("⚠️  No requirements.txt found, skipping install", "warn")
             venv_python = VENV_PYTHON
